@@ -1,9 +1,11 @@
 import type Database from 'better-sqlite3';
+import { DbConfigError, DbConnectionError } from './errors';
 
 let sqliteDb: Database.Database | null = null;
 let pgSql: import('postgres').Sql | null = null;
 let initialized = false;
 let postgresMode = false;
+let activeEnvVar: string | null = null;
 
 const POSTGRES_SCHEMA = `
 CREATE TABLE IF NOT EXISTS monitor_sites (
@@ -158,17 +160,48 @@ CREATE INDEX IF NOT EXISTS idx_listings_detected ON listings(detected_at);
 CREATE INDEX IF NOT EXISTS idx_crawl_logs_site ON crawl_logs(monitor_site_id);
 `;
 
+const REQUIRED_TABLES = [
+  'monitor_sites',
+  'listings',
+  'crawl_logs',
+  'notifications',
+  'settings',
+  'exclude_keywords',
+] as const;
+
+function detectDatabaseEnvVar(): string | null {
+  if (process.env.DATABASE_URL) return 'DATABASE_URL';
+  if (process.env.POSTGRES_URL) return 'POSTGRES_URL';
+  if (process.env.POSTGRES_URL_NON_POOLING) return 'POSTGRES_URL_NON_POOLING';
+  if (process.env.POSTGRES_PRISMA_URL) return 'POSTGRES_PRISMA_URL';
+  return null;
+}
+
 export function getDatabaseUrl(): string | undefined {
-  return (
-    process.env.DATABASE_URL ||
-    process.env.POSTGRES_URL ||
-    process.env.POSTGRES_PRISMA_URL ||
-    process.env.POSTGRES_URL_NON_POOLING
-  );
+  const envVar = detectDatabaseEnvVar();
+  if (!envVar) return undefined;
+  activeEnvVar = envVar;
+  return process.env[envVar];
+}
+
+export function getDbMode(): 'postgres' | 'sqlite' | 'unconfigured' {
+  if (getDatabaseUrl()) return 'postgres';
+  if (process.env.VERCEL === '1') return 'unconfigured';
+  return 'sqlite';
 }
 
 export function isPostgresMode(): boolean {
   return postgresMode;
+}
+
+/** SQLite=0/1, PostgreSQL=true/false */
+export function dbBool(value: boolean): boolean | 0 | 1 {
+  return postgresMode ? value : value ? 1 : 0;
+}
+
+function getSslOption(url: string): 'require' | false {
+  if (/sslmode=disable/i.test(url)) return false;
+  return 'require';
 }
 
 function adaptSqlForPg(sql: string): string {
@@ -186,6 +219,7 @@ function adaptSqlForPg(sql: string): string {
     .replace(/\bhas_similar = 1\b/g, 'has_similar = true')
     .replace(/\bis_excluded = 1\b/g, 'is_excluded = true')
     .replace(/\bis_sample = 1\b/g, 'is_sample = true')
+    .replace(/\bis_manual = 1\b/g, 'is_manual = true')
     .replace(/\benabled = 1\b/g, 'enabled = true')
     .replace(/\benabled = 0\b/g, 'enabled = false')
     .replace(/\bread = 0\b/g, '"read" = false')
@@ -205,12 +239,26 @@ async function getPg(): Promise<import('postgres').Sql> {
   if (!pgSql) {
     const url = getDatabaseUrl();
     if (!url) {
-      throw new Error(
+      throw new DbConfigError(
         'DATABASE_URL (または POSTGRES_URL) が未設定です。Vercelでは Neon / Vercel Postgres / Supabase の接続文字列を設定してください。'
       );
     }
-    const postgres = (await import('postgres')).default;
-    pgSql = postgres(url, { ssl: 'require', max: 1 });
+    try {
+      const postgres = (await import('postgres')).default;
+      pgSql = postgres(url, {
+        ssl: getSslOption(url),
+        max: 1,
+        idle_timeout: 20,
+        connect_timeout: 10,
+      });
+      console.log('[DB] PostgreSQL client created', {
+        envVar: activeEnvVar,
+        ssl: getSslOption(url) !== false,
+      });
+    } catch (e) {
+      console.error('[DB] Failed to create PostgreSQL client:', e);
+      throw new DbConnectionError('PostgreSQLクライアントの作成に失敗しました。', e);
+    }
   }
   return pgSql;
 }
@@ -226,8 +274,31 @@ async function getSqlite(): Promise<Database.Database> {
     sqliteDb = new Database(dbPath);
     sqliteDb.pragma('journal_mode = WAL');
     sqliteDb.pragma('foreign_keys = ON');
+    console.log('[DB] SQLite opened:', dbPath);
   }
   return sqliteDb;
+}
+
+async function runPostgresMigrations(pg: import('postgres').Sql): Promise<void> {
+  const statements = POSTGRES_SCHEMA.split(';').map((s) => s.trim()).filter(Boolean);
+  for (const stmt of statements) {
+    try {
+      await pg.unsafe(stmt);
+    } catch (e) {
+      console.error('[DB] Migration statement failed:', stmt.slice(0, 80), e);
+      throw new DbConnectionError('データベーステーブルの作成に失敗しました。', e);
+    }
+  }
+  console.log('[DB] PostgreSQL schema migration completed');
+}
+
+async function verifyPostgresTables(pg: import('postgres').Sql): Promise<string[]> {
+  const rows = await pg<{ tablename: string }[]>`
+    SELECT tablename FROM pg_tables
+    WHERE schemaname = 'public'
+    AND tablename = ANY(${REQUIRED_TABLES as unknown as string[]})
+  `;
+  return rows.map((r) => r.tablename);
 }
 
 export async function dbAll(sql: string, params: unknown[] = []): Promise<Record<string, unknown>[]> {
@@ -235,7 +306,12 @@ export async function dbAll(sql: string, params: unknown[] = []): Promise<Record
   if (postgresMode) {
     const pg = await getPg();
     const { sql: q, params: p } = toPgParams(sql, params);
-    return (await pg.unsafe(q, p as never[])) as Record<string, unknown>[];
+    try {
+      return (await pg.unsafe(q, p as never[])) as Record<string, unknown>[];
+    } catch (e) {
+      console.error('[DB] Query failed:', q, e);
+      throw new DbConnectionError('データベースクエリの実行に失敗しました。', e);
+    }
   }
   const db = await getSqlite();
   return db.prepare(sql).all(...params) as Record<string, unknown>[];
@@ -255,8 +331,13 @@ export async function dbRun(sql: string, params: unknown[] = []): Promise<{ last
       q = q.replace(/;?\s*$/, ' RETURNING id');
     }
     const { sql: pgSqlText, params: p } = toPgParams(q, params);
-    const rows = (await pg.unsafe(pgSqlText, p as never[])) as { id: number }[];
-    return { lastInsertRowid: Number(rows[0]?.id ?? 0) };
+    try {
+      const rows = (await pg.unsafe(pgSqlText, p as never[])) as { id: number }[];
+      return { lastInsertRowid: Number(rows[0]?.id ?? 0) };
+    } catch (e) {
+      console.error('[DB] Execute failed:', pgSqlText, e);
+      throw new DbConnectionError('データベースの更新に失敗しました。', e);
+    }
   }
   const db = await getSqlite();
   const result = db.prepare(sql).run(...params);
@@ -267,26 +348,106 @@ export async function ensureDb(): Promise<void> {
   if (initialized) return;
 
   const url = getDatabaseUrl();
-  if (url || process.env.VERCEL === '1') {
+  const isVercel = process.env.VERCEL === '1';
+
+  if (url || isVercel) {
     postgresMode = true;
     if (!url) {
-      throw new Error(
-        'Vercel環境では DATABASE_URL または POSTGRES_URL の設定が必須です。SQLiteファイルはサーバーレス環境で永続化できません。'
-      );
+      const msg =
+        'Vercel環境では DATABASE_URL または POSTGRES_URL の設定が必須です。SQLiteファイルはサーバーレス環境で永続化できません。';
+      console.error('[DB] Configuration error:', msg);
+      console.error('[DB] Checked env vars (all empty): DATABASE_URL, POSTGRES_URL, POSTGRES_URL_NON_POOLING, POSTGRES_PRISMA_URL');
+      throw new DbConfigError(msg);
     }
-    const pg = await getPg();
-    const statements = POSTGRES_SCHEMA.split(';').map((s) => s.trim()).filter(Boolean);
-    for (const stmt of statements) {
-      await pg.unsafe(stmt);
+
+    try {
+      const pg = await getPg();
+      await pg`SELECT 1 as ok`;
+      console.log('[DB] Connection test OK');
+
+      await runPostgresMigrations(pg);
+
+      const tables = await verifyPostgresTables(pg);
+      const missing = REQUIRED_TABLES.filter((t) => !tables.includes(t));
+      if (missing.length > 0) {
+        console.error('[DB] Missing tables after migration:', missing);
+        throw new DbConnectionError(`必要なテーブルが存在しません: ${missing.join(', ')}`);
+      }
+      console.log('[DB] All required tables present:', tables.join(', '));
+
+      initialized = true;
+      await seedIfEmpty();
+    } catch (e) {
+      if (e instanceof DbConfigError || e instanceof DbConnectionError) throw e;
+      console.error('[DB] PostgreSQL initialization failed:', e);
+      throw new DbConnectionError('データベースの初期化に失敗しました。', e);
     }
-    initialized = true;
-    await seedIfEmpty();
   } else {
     postgresMode = false;
-    const db = await getSqlite();
-    db.exec(SQLITE_SCHEMA);
-    initialized = true;
-    await seedIfEmpty();
+    try {
+      const db = await getSqlite();
+      db.exec(SQLITE_SCHEMA);
+      initialized = true;
+      await seedIfEmpty();
+      console.log('[DB] SQLite initialization completed');
+    } catch (e) {
+      console.error('[DB] SQLite initialization failed:', e);
+      throw new DbConnectionError('SQLiteデータベースの初期化に失敗しました。', e);
+    }
+  }
+}
+
+export async function getDbHealth(): Promise<{
+  mode: 'postgres' | 'sqlite' | 'unconfigured';
+  connected: boolean;
+  envVar: string | null;
+  tables: string[];
+  monitorSiteCount: number;
+  error?: string;
+}> {
+  const mode = getDbMode();
+  if (mode === 'unconfigured') {
+    return {
+      mode,
+      connected: false,
+      envVar: null,
+      tables: [],
+      monitorSiteCount: 0,
+      error: 'DATABASE_URL または POSTGRES_URL が未設定です',
+    };
+  }
+
+  try {
+    await ensureDb();
+    const tables = postgresMode
+      ? await verifyPostgresTables(await getPg())
+      : REQUIRED_TABLES.filter((t) => {
+          const db = sqliteDb!;
+          const row = db.prepare(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name = ?"
+          ).get(t);
+          return !!row;
+        });
+
+    const countRow = await dbGet('SELECT COUNT(*) as c FROM monitor_sites');
+    return {
+      mode: postgresMode ? 'postgres' : 'sqlite',
+      connected: true,
+      envVar: activeEnvVar,
+      tables,
+      monitorSiteCount: Number(countRow?.c ?? 0),
+    };
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    console.error('[DB] Health check failed:', message);
+    return {
+      mode,
+      connected: false,
+      envVar: activeEnvVar,
+      tables: [],
+      monitorSiteCount: 0,
+      error: message,
+    };
   }
 }
 
@@ -299,9 +460,10 @@ async function seedIfEmpty() {
       await dbRun(
         `INSERT INTO monitor_sites (name, url, source_type, frequency_minutes, enabled, region, memo)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [store.name, store.url, store.source_type, store.frequency_minutes, store.enabled ? 1 : 0, store.region, store.memo]
+        [store.name, store.url, store.source_type, store.frequency_minutes, dbBool(store.enabled), store.region, store.memo]
       );
     }
+    console.log('[DB] Seeded sample monitor sites');
   }
 
   const settingsCount = await dbGet('SELECT COUNT(*) as c FROM settings');
@@ -346,7 +508,7 @@ async function seedIfEmpty() {
         null, null, null, '不明', '不明', 'nationwide', 'online', 'https://example.com/sample',
         'official', 75,
         'これはサンプルデータです。実際の抽選情報ではありません。ポケモンカードの抽選販売に関する情報がここに表示されます。',
-        'unconfirmed', 1,
+        'unconfirmed', dbBool(true),
       ]
     );
   }

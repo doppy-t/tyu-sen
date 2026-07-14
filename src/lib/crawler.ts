@@ -2,7 +2,7 @@ import * as cheerio from 'cheerio';
 import { detectLotteryInfo, calculateConfidence } from './detector';
 import { extractDates, extractProductName, extractConditions, detectChannel } from './date-parser';
 import { checkDuplicate } from './deduplicator';
-import { dbAll, dbRun, getSettings, rowToListing, rowToMonitorSite } from './db';
+import { dbAll, dbRun, getSettings, rowToListing, rowToMonitorSite, dbBool } from './db';
 import type { MonitorSite, SourceType } from './types';
 import { createNotification } from './notifications';
 
@@ -165,8 +165,8 @@ export async function crawlMonitorSite(site: MonitorSite): Promise<CrawlResult> 
             dates.purchase_period ?? '不明', conditions ?? '不明',
             site.region, channel, candidate.url, now, now, site.source_type,
             confidence, detection.excerpt, status,
-            detection.isExcluded ? 1 : 0,
-            dup.similarGroupId, dup.isSimilar ? 1 : 0,
+            detection.isExcluded ? dbBool(true) : dbBool(false),
+            dup.similarGroupId, dbBool(dup.isSimilar),
           ]
         );
 

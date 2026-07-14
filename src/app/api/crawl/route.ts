@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { dbAll } from '@/lib/db';
 import { crawlAllEnabled } from '@/lib/crawler';
 import { checkDeadlineNotifications } from '@/lib/notifications';
+import { handleApiError } from '@/lib/api-error';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
@@ -12,7 +13,7 @@ export async function POST() {
     await checkDeadlineNotifications();
     return NextResponse.json(result);
   } catch (e) {
-    return NextResponse.json({ error: String(e) }, { status: 500 });
+    return handleApiError(e, 'POST /api/crawl');
   }
 }
 
@@ -27,6 +28,6 @@ export async function GET(request: Request) {
 
     return NextResponse.json(logs);
   } catch (e) {
-    return NextResponse.json({ error: String(e) }, { status: 500 });
+    return handleApiError(e, 'GET /api/crawl');
   }
 }

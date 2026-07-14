@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { dbRun, rowToListing } from '@/lib/db';
+import { dbRun, dbBool, rowToListing } from '@/lib/db';
 import { getListings, type ListingFilters } from '@/lib/services';
 import type { ListingStatus } from '@/lib/types';
+import { handleApiError } from '@/lib/api-error';
 
 export const dynamic = 'force-dynamic';
 
@@ -30,7 +31,7 @@ export async function GET(request: NextRequest) {
     const listings = rows.map((r) => rowToListing(r));
     return NextResponse.json(listings);
   } catch (e) {
-    return NextResponse.json({ error: String(e) }, { status: 500 });
+    return handleApiError(e, 'GET /api/listings');
   }
 }
 
@@ -42,7 +43,7 @@ export async function POST(request: NextRequest) {
         store_name, product_name, title, application_start, application_deadline,
         lottery_result_date, purchase_period, conditions, region, channel, source_url,
         source_type, confidence, excerpt, status, is_manual, is_excluded
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         body.store_name ?? '手動登録',
         body.product_name ?? '不明',
@@ -59,12 +60,13 @@ export async function POST(request: NextRequest) {
         body.confidence ?? 50,
         body.excerpt ?? '',
         body.status ?? 'unconfirmed',
-        body.is_excluded ? 1 : 0,
+        dbBool(true),
+        dbBool(Boolean(body.is_excluded)),
       ]
     );
 
     return NextResponse.json({ id: result.lastInsertRowid }, { status: 201 });
   } catch (e) {
-    return NextResponse.json({ error: String(e) }, { status: 500 });
+    return handleApiError(e, 'POST /api/listings');
   }
 }

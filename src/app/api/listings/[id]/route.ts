@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { dbAll, dbGet, dbRun, rowToListing } from '@/lib/db';
 import { findSimilarListings } from '@/lib/deduplicator';
+import { handleApiError } from '@/lib/api-error';
 
 export const dynamic = 'force-dynamic';
 
@@ -18,7 +19,7 @@ export async function GET(
 
     return NextResponse.json({ listing, similar });
   } catch (e) {
-    return NextResponse.json({ error: String(e) }, { status: 500 });
+    return handleApiError(e, 'GET /api/listings/[id]');
   }
 }
 
@@ -54,7 +55,7 @@ export async function PATCH(
     const row = await dbGet('SELECT * FROM listings WHERE id = ?', [params.id]);
     return NextResponse.json(rowToListing(row!));
   } catch (e) {
-    return NextResponse.json({ error: String(e) }, { status: 500 });
+    return handleApiError(e, 'PATCH /api/listings/[id]');
   }
 }
 
@@ -66,6 +67,6 @@ export async function DELETE(
     await dbRun('DELETE FROM listings WHERE id = ?', [params.id]);
     return NextResponse.json({ ok: true });
   } catch (e) {
-    return NextResponse.json({ error: String(e) }, { status: 500 });
+    return handleApiError(e, 'DELETE /api/listings/[id]');
   }
 }

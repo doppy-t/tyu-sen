@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { dbGet, rowToMonitorSite } from '@/lib/db';
 import { crawlMonitorSite } from '@/lib/crawler';
+import { handleApiError } from '@/lib/api-error';
 
 export const dynamic = 'force-dynamic';
 
@@ -16,6 +17,6 @@ export async function POST(
     const result = await crawlMonitorSite(site);
     return NextResponse.json(result);
   } catch (e) {
-    return NextResponse.json({ error: String(e) }, { status: 500 });
+    return handleApiError(e, 'POST /api/monitors/[id]/crawl');
   }
 }

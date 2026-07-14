@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { dbAll, dbGet, dbRun, rowToMonitorSite } from '@/lib/db';
+import { dbAll, dbGet, dbRun, dbBool, rowToMonitorSite } from '@/lib/db';
+import { handleApiError } from '@/lib/api-error';
 
 export const dynamic = 'force-dynamic';
 
@@ -8,7 +9,7 @@ export async function GET() {
     const rows = await dbAll('SELECT * FROM monitor_sites ORDER BY name');
     return NextResponse.json(rows.map((r) => rowToMonitorSite(r)));
   } catch (e) {
-    return NextResponse.json({ error: String(e) }, { status: 500 });
+    return handleApiError(e, 'GET /api/monitors');
   }
 }
 
@@ -23,7 +24,7 @@ export async function POST(request: NextRequest) {
         body.url || null,
         body.source_type ?? 'official',
         body.frequency_minutes ?? 60,
-        body.enabled !== false ? 1 : 0,
+        dbBool(body.enabled !== false),
         body.region ?? 'nationwide',
         body.memo ?? '',
       ]
@@ -31,6 +32,6 @@ export async function POST(request: NextRequest) {
     const row = await dbGet('SELECT * FROM monitor_sites WHERE id = ?', [result.lastInsertRowid]);
     return NextResponse.json(rowToMonitorSite(row!), { status: 201 });
   } catch (e) {
-    return NextResponse.json({ error: String(e) }, { status: 500 });
+    return handleApiError(e, 'POST /api/monitors');
   }
 }

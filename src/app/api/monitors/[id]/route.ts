@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { dbGet, dbRun, rowToMonitorSite } from '@/lib/db';
+import { dbGet, dbRun, dbBool, rowToMonitorSite } from '@/lib/db';
+import { handleApiError } from '@/lib/api-error';
 
 export const dynamic = 'force-dynamic';
 
@@ -12,7 +13,7 @@ export async function GET(
     if (!row) return NextResponse.json({ error: 'Not found' }, { status: 404 });
     return NextResponse.json(rowToMonitorSite(row));
   } catch (e) {
-    return NextResponse.json({ error: String(e) }, { status: 500 });
+    return handleApiError(e, 'GET /api/monitors/[id]');
   }
 }
 
@@ -29,7 +30,7 @@ export async function PATCH(
     for (const key of allowed) {
       if (key in body) {
         sets.push(`${key} = ?`);
-        values.push(key === 'enabled' ? (body[key] ? 1 : 0) : body[key]);
+        values.push(key === 'enabled' ? dbBool(Boolean(body[key])) : body[key]);
       }
     }
 
@@ -41,7 +42,7 @@ export async function PATCH(
     const row = await dbGet('SELECT * FROM monitor_sites WHERE id = ?', [params.id]);
     return NextResponse.json(rowToMonitorSite(row!));
   } catch (e) {
-    return NextResponse.json({ error: String(e) }, { status: 500 });
+    return handleApiError(e, 'PATCH /api/monitors/[id]');
   }
 }
 
@@ -53,6 +54,6 @@ export async function DELETE(
     await dbRun('DELETE FROM monitor_sites WHERE id = ?', [params.id]);
     return NextResponse.json({ ok: true });
   } catch (e) {
-    return NextResponse.json({ error: String(e) }, { status: 500 });
+    return handleApiError(e, 'DELETE /api/monitors/[id]');
   }
 }
