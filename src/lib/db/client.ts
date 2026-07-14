@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS listings (
   region TEXT NOT NULL DEFAULT 'nationwide',
   channel TEXT NOT NULL DEFAULT 'unknown',
   source_url TEXT NOT NULL,
+  application_url TEXT,
   detected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   last_checked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   source_type TEXT NOT NULL DEFAULT 'other',
@@ -56,6 +57,10 @@ CREATE TABLE IF NOT EXISTS crawl_logs (
   url TEXT NOT NULL,
   http_status INTEGER,
   detected_count INTEGER NOT NULL DEFAULT 0,
+  candidate_count INTEGER NOT NULL DEFAULT 0,
+  saved_count INTEGER NOT NULL DEFAULT 0,
+  duplicate_skipped_count INTEGER NOT NULL DEFAULT 0,
+  processing_time_ms INTEGER NOT NULL DEFAULT 0,
   error_message TEXT,
   last_success_at TIMESTAMPTZ
 );
@@ -109,6 +114,7 @@ CREATE TABLE IF NOT EXISTS listings (
   region TEXT NOT NULL DEFAULT 'nationwide',
   channel TEXT NOT NULL DEFAULT 'unknown',
   source_url TEXT NOT NULL,
+  application_url TEXT,
   detected_at TEXT NOT NULL DEFAULT (datetime('now')),
   last_checked_at TEXT NOT NULL DEFAULT (datetime('now')),
   source_type TEXT NOT NULL DEFAULT 'other',
@@ -132,6 +138,10 @@ CREATE TABLE IF NOT EXISTS crawl_logs (
   url TEXT NOT NULL,
   http_status INTEGER,
   detected_count INTEGER NOT NULL DEFAULT 0,
+  candidate_count INTEGER NOT NULL DEFAULT 0,
+  saved_count INTEGER NOT NULL DEFAULT 0,
+  duplicate_skipped_count INTEGER NOT NULL DEFAULT 0,
+  processing_time_ms INTEGER NOT NULL DEFAULT 0,
   error_message TEXT,
   last_success_at TEXT,
   FOREIGN KEY (monitor_site_id) REFERENCES monitor_sites(id) ON DELETE SET NULL
@@ -168,6 +178,23 @@ const REQUIRED_TABLES = [
   'settings',
   'exclude_keywords',
 ] as const;
+
+const SCHEMA_MIGRATIONS = {
+  postgres: [
+    'ALTER TABLE listings ADD COLUMN IF NOT EXISTS application_url TEXT',
+    'ALTER TABLE crawl_logs ADD COLUMN IF NOT EXISTS candidate_count INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE crawl_logs ADD COLUMN IF NOT EXISTS saved_count INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE crawl_logs ADD COLUMN IF NOT EXISTS duplicate_skipped_count INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE crawl_logs ADD COLUMN IF NOT EXISTS processing_time_ms INTEGER NOT NULL DEFAULT 0',
+  ],
+  sqlite: [
+    'ALTER TABLE listings ADD COLUMN application_url TEXT',
+    'ALTER TABLE crawl_logs ADD COLUMN candidate_count INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE crawl_logs ADD COLUMN saved_count INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE crawl_logs ADD COLUMN duplicate_skipped_count INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE crawl_logs ADD COLUMN processing_time_ms INTEGER NOT NULL DEFAULT 0',
+  ],
+};
 
 /** 優先順位の高い順。最初に値が設定されている変数を使用する */
 export const DATABASE_ENV_VAR_NAMES = [
@@ -324,6 +351,13 @@ async function runPostgresMigrations(pg: import('postgres').Sql): Promise<void> 
     }
   }
   console.log('[DB] PostgreSQL schema migration completed');
+  for (const stmt of SCHEMA_MIGRATIONS.postgres) {
+    try {
+      await pg.unsafe(stmt);
+    } catch (e) {
+      console.warn('[DB] Optional migration skipped:', stmt.slice(0, 60), e);
+    }
+  }
 }
 
 async function verifyPostgresTables(pg: import('postgres').Sql): Promise<string[]> {
@@ -427,6 +461,13 @@ export async function ensureDb(): Promise<void> {
     try {
       const db = await getSqlite();
       db.exec(SQLITE_SCHEMA);
+      for (const stmt of SCHEMA_MIGRATIONS.sqlite) {
+        try {
+          db.exec(stmt);
+        } catch {
+          // column may already exist
+        }
+      }
       initialized = true;
       await seedIfEmpty();
       console.log('[DB] SQLite initialization completed');

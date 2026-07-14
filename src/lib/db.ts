@@ -94,6 +94,7 @@ export function rowToListing(row: Record<string, unknown>): Listing {
     region: row.region as Listing['region'],
     channel: row.channel as Listing['channel'],
     source_url: row.source_url as string,
+    application_url: (row.application_url as string | null) ?? null,
     detected_at: String(row.detected_at),
     last_checked_at: String(row.last_checked_at),
     source_type: row.source_type as Listing['source_type'],

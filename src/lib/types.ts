@@ -43,6 +43,7 @@ export interface Listing {
   region: Region;
   channel: ChannelType;
   source_url: string;
+  application_url: string | null;
   detected_at: string;
   last_checked_at: string;
   source_type: SourceType;
@@ -66,6 +67,10 @@ export interface CrawlLog {
   url: string;
   http_status: number | null;
   detected_count: number;
+  candidate_count: number;
+  saved_count: number;
+  duplicate_skipped_count: number;
+  processing_time_ms: number;
   error_message: string | null;
   last_success_at: string | null;
 }

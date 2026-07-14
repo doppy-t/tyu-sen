@@ -1,6 +1,10 @@
 import * as cheerio from 'cheerio';
-import { detectLotteryInfo, calculateConfidence } from './detector';
-import { extractDates, extractProductName, extractConditions, detectChannel } from './date-parser';
+import {
+  extractPageCandidates,
+  defaultLotteryDetector,
+  defaultLotteryExtractor,
+  type PageContent,
+} from './lottery';
 import { checkDuplicate } from './deduplicator';
 import { dbAll, dbRun, getSettings, rowToListing, rowToMonitorSite, dbBool } from './db';
 import type { MonitorSite, SourceType } from './types';
@@ -60,24 +64,82 @@ export async function fetchPage(url: string): Promise<FetchResult> {
 
 export interface CrawlResult {
   detectedCount: number;
+  candidateCount: number;
+  savedCount: number;
+  duplicateSkippedCount: number;
+  processingTimeMs: number;
   error: string | null;
   httpStatus: number | null;
 }
 
+async function insertCrawlLog(params: {
+  siteId: number;
+  startedAt: string;
+  url: string;
+  httpStatus: number | null;
+  candidateCount: number;
+  savedCount: number;
+  duplicateSkippedCount: number;
+  processingTimeMs: number;
+  error: string | null;
+  lastSuccessAt?: string | null;
+}) {
+  await dbRun(
+    `INSERT INTO crawl_logs (
+      monitor_site_id, started_at, ended_at, url, http_status,
+      detected_count, candidate_count, saved_count, duplicate_skipped_count,
+      processing_time_ms, error_message, last_success_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      params.siteId,
+      params.startedAt,
+      new Date().toISOString(),
+      params.url,
+      params.httpStatus,
+      params.savedCount,
+      params.candidateCount,
+      params.savedCount,
+      params.duplicateSkippedCount,
+      params.processingTimeMs,
+      params.error,
+      params.lastSuccessAt ?? null,
+    ]
+  );
+}
+
 export async function crawlMonitorSite(site: MonitorSite): Promise<CrawlResult> {
   const startedAt = new Date().toISOString();
+  const crawlStarted = Date.now();
   let httpStatus: number | null = null;
-  let detectedCount = 0;
+  let candidateCount = 0;
+  let savedCount = 0;
+  let duplicateSkippedCount = 0;
   let error: string | null = null;
+
+  const emptyResult = (): CrawlResult => ({
+    detectedCount: savedCount,
+    candidateCount,
+    savedCount,
+    duplicateSkippedCount,
+    processingTimeMs: Date.now() - crawlStarted,
+    error,
+    httpStatus,
+  });
 
   if (!site.url) {
     error = '監視URLが未設定です';
-    await dbRun(
-      `INSERT INTO crawl_logs (monitor_site_id, started_at, ended_at, url, http_status, detected_count, error_message)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [site.id, startedAt, new Date().toISOString(), '(未設定)', null, 0, error]
-    );
-    return { detectedCount: 0, error, httpStatus: null };
+    await insertCrawlLog({
+      siteId: site.id,
+      startedAt,
+      url: '(未設定)',
+      httpStatus: null,
+      candidateCount: 0,
+      savedCount: 0,
+      duplicateSkippedCount: 0,
+      processingTimeMs: Date.now() - crawlStarted,
+      error,
+    });
+    return emptyResult();
   }
 
   try {
@@ -86,181 +148,232 @@ export async function crawlMonitorSite(site: MonitorSite): Promise<CrawlResult> 
 
     if (httpStatus >= 400) {
       error = `HTTP ${httpStatus}`;
-      await dbRun(
-        `INSERT INTO crawl_logs (monitor_site_id, started_at, ended_at, url, http_status, detected_count, error_message)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [site.id, startedAt, new Date().toISOString(), site.url, httpStatus, 0, error]
+      await insertCrawlLog({
+        siteId: site.id,
+        startedAt,
+        url: site.url,
+        httpStatus,
+        candidateCount: 0,
+        savedCount: 0,
+        duplicateSkippedCount: 0,
+        processingTimeMs: Date.now() - crawlStarted,
+        error,
+      });
+      return emptyResult();
+    }
+
+    const settings = await getSettings();
+    const excludeRows = await dbAll('SELECT keyword FROM exclude_keywords WHERE enabled = 1');
+    const excludeKeywords = [
+      ...settings.exclude_keywords,
+      ...excludeRows.map((r) => (r as { keyword: string }).keyword),
+    ];
+
+    const pageCandidates = extractPageCandidates(page, site.url);
+    const existingRows = await dbAll('SELECT * FROM listings WHERE is_sample = 0');
+    const existing = existingRows.map((r) => rowToListing(r));
+
+    for (const candidate of pageCandidates) {
+      const pageContent: PageContent = {
+        title: candidate.title,
+        body: candidate.body,
+        headings: candidate.headings,
+        linkTexts: candidate.linkTexts,
+        links: candidate.links,
+        sourceUrl: candidate.sourceUrl,
+      };
+
+      const detection = defaultLotteryDetector.detect(pageContent, {
+        detectKeywords: settings.detect_keywords,
+        excludeKeywords,
+      });
+
+      if (!detection.isCandidate) continue;
+      candidateCount++;
+
+      const extracted = defaultLotteryExtractor.extract(pageContent, detection, {
+        storeName: site.name,
+        sourceType: site.source_type,
+        region: site.region,
+      });
+
+      const dup = checkDuplicate(
+        {
+          store_name: extracted.storeName,
+          product_name: extracted.productName,
+          application_deadline: extracted.applicationDeadline,
+          title: extracted.title,
+          source_url: extracted.sourceUrl,
+          excerpt: extracted.excerpt,
+        },
+        existing
       );
-    } else {
-      const settings = await getSettings();
-      const excludeRows = await dbAll('SELECT keyword FROM exclude_keywords WHERE enabled = 1');
-      const excludeKeywords = [
-        ...settings.exclude_keywords,
-        ...excludeRows.map((r) => (r as { keyword: string }).keyword),
-      ];
 
-      const candidates = extractCandidates(page, site.url);
-
-      for (const candidate of candidates) {
-        const detection = detectLotteryInfo({
-          title: candidate.title,
-          body: candidate.body,
-          headings: candidate.headings,
-          linkTexts: candidate.linkTexts,
-          detectKeywords: settings.detect_keywords,
-          excludeKeywords,
-        });
-
-        if (!detection.detected) continue;
-
-        const dates = extractDates(candidate.body);
-        const productName = extractProductName(candidate.body, candidate.title);
-        const conditions = extractConditions(candidate.body);
-        const channel = detectChannel(candidate.body);
-
-        const confidence = calculateConfidence({
-          matchedProductKeywords: detection.matchedProductKeywords,
-          matchedSaleKeywords: detection.matchedSaleKeywords,
-          hasApplicationForm: detection.hasApplicationForm,
-          applicationDeadline: dates.application_deadline,
-          productName,
-          sourceType: site.source_type,
-          lotteryResultDate: dates.lottery_result_date,
-          purchasePeriod: dates.purchase_period,
-        });
-
-        const status = confidence < 40 ? 'needs_review' : 'unconfirmed';
-
-        const existingRows = await dbAll('SELECT * FROM listings WHERE is_sample = 0');
-        const existing = existingRows.map((r) => rowToListing(r));
-
-        const dup = checkDuplicate(
-          {
-            store_name: site.name,
-            product_name: productName,
-            application_deadline: dates.application_deadline,
-            title: candidate.title,
-            source_url: candidate.url,
-            excerpt: detection.excerpt,
-          },
-          existing
-        );
-
-        if (dup.isDuplicate) {
-          await dbRun(`UPDATE listings SET last_checked_at = datetime('now') WHERE id = ?`, [dup.matchedListingId]);
-          continue;
-        }
-
-        const now = new Date().toISOString();
-        const result = await dbRun(
-          `INSERT INTO listings (
-            monitor_site_id, store_name, product_name, title,
-            application_start, application_deadline, lottery_result_date, purchase_period, conditions,
-            region, channel, source_url, detected_at, last_checked_at, source_type,
-            confidence, excerpt, status, is_excluded, similar_group_id, has_similar
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            site.id, site.name, productName, candidate.title,
-            dates.application_start, dates.application_deadline, dates.lottery_result_date,
-            dates.purchase_period ?? '不明', conditions ?? '不明',
-            site.region, channel, candidate.url, now, now, site.source_type,
-            confidence, detection.excerpt, status,
-            detection.isExcluded ? dbBool(true) : dbBool(false),
-            dup.similarGroupId, dbBool(dup.isSimilar),
-          ]
-        );
-
-        if (dup.isSimilar && dup.matchedListingId) {
-          await dbRun('UPDATE listings SET has_similar = 1, similar_group_id = ? WHERE id = ?',
-            [dup.similarGroupId, dup.matchedListingId]);
-        }
-
-        detectedCount++;
-        await createNotification('new_listing', result.lastInsertRowid, `新しい抽選情報: ${candidate.title}（${site.name}）`);
+      if (dup.isDuplicate) {
+        duplicateSkippedCount++;
+        await dbRun(`UPDATE listings SET last_checked_at = datetime('now') WHERE id = ?`, [dup.matchedListingId]);
+        continue;
       }
 
-      await dbRun(
-        `INSERT INTO crawl_logs (monitor_site_id, started_at, ended_at, url, http_status, detected_count, error_message, last_success_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [site.id, startedAt, new Date().toISOString(), site.url, httpStatus, detectedCount, null, new Date().toISOString()]
+      const now = new Date().toISOString();
+      const result = await dbRun(
+        `INSERT INTO listings (
+          monitor_site_id, store_name, product_name, title,
+          application_start, application_deadline, lottery_result_date, purchase_period, conditions,
+          region, channel, source_url, application_url, detected_at, last_checked_at, source_type,
+          confidence, excerpt, status, is_excluded, similar_group_id, has_similar
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          site.id,
+          extracted.storeName,
+          extracted.productName,
+          extracted.title,
+          extracted.applicationStart,
+          extracted.applicationDeadline,
+          extracted.lotteryResultDate,
+          extracted.purchasePeriod,
+          extracted.conditions,
+          extracted.region,
+          extracted.channel,
+          extracted.sourceUrl,
+          extracted.applicationUrl,
+          now,
+          now,
+          site.source_type,
+          extracted.confidence,
+          extracted.excerpt,
+          extracted.status,
+          dbBool(extracted.isExcluded),
+          dup.similarGroupId,
+          dbBool(dup.isSimilar),
+        ]
       );
+
+      if (dup.isSimilar && dup.matchedListingId) {
+        await dbRun('UPDATE listings SET has_similar = 1, similar_group_id = ? WHERE id = ?',
+          [dup.similarGroupId, dup.matchedListingId]);
+      }
+
+      savedCount++;
+      await createNotification(
+        'new_listing',
+        result.lastInsertRowid,
+        `新しい抽選情報: ${extracted.title}（${site.name}）スコア${extracted.confidence}点`
+      );
+
+      existing.push({
+        id: result.lastInsertRowid,
+        monitor_site_id: site.id,
+        store_name: extracted.storeName,
+        product_name: extracted.productName,
+        title: extracted.title,
+        application_start: extracted.applicationStart,
+        application_deadline: extracted.applicationDeadline,
+        lottery_result_date: extracted.lotteryResultDate,
+        purchase_period: extracted.purchasePeriod,
+        conditions: extracted.conditions,
+        region: extracted.region,
+        channel: extracted.channel,
+        source_url: extracted.sourceUrl,
+        application_url: extracted.applicationUrl,
+        detected_at: now,
+        last_checked_at: now,
+        source_type: site.source_type,
+        confidence: extracted.confidence,
+        excerpt: extracted.excerpt,
+        status: extracted.status,
+        is_excluded: extracted.isExcluded,
+        similar_group_id: dup.similarGroupId,
+        has_similar: dup.isSimilar,
+        is_manual: false,
+        is_sample: false,
+        created_at: now,
+        updated_at: now,
+      });
     }
+
+    await insertCrawlLog({
+      siteId: site.id,
+      startedAt,
+      url: site.url,
+      httpStatus,
+      candidateCount,
+      savedCount,
+      duplicateSkippedCount,
+      processingTimeMs: Date.now() - crawlStarted,
+      error: null,
+      lastSuccessAt: new Date().toISOString(),
+    });
   } catch (e) {
     error = e instanceof Error ? e.message : String(e);
-    await dbRun(
-      `INSERT INTO crawl_logs (monitor_site_id, started_at, ended_at, url, http_status, detected_count, error_message)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [site.id, startedAt, new Date().toISOString(), site.url ?? '(不明)', httpStatus, detectedCount, error]
-    );
+    console.error('[Crawl] Error:', error);
+    await insertCrawlLog({
+      siteId: site.id,
+      startedAt,
+      url: site.url ?? '(不明)',
+      httpStatus,
+      candidateCount,
+      savedCount,
+      duplicateSkippedCount,
+      processingTimeMs: Date.now() - crawlStarted,
+      error,
+    });
   }
 
-  return { detectedCount, error, httpStatus };
-}
-
-interface PageCandidate {
-  title: string;
-  body: string;
-  headings: string[];
-  linkTexts: string[];
-  url: string;
-}
-
-function extractCandidates(page: FetchResult, baseUrl: string): PageCandidate[] {
-  return [{
-    title: page.title,
-    body: page.body,
-    headings: page.headings,
-    linkTexts: page.linkTexts,
-    url: baseUrl,
-  }];
+  return {
+    detectedCount: savedCount,
+    candidateCount,
+    savedCount,
+    duplicateSkippedCount,
+    processingTimeMs: Date.now() - crawlStarted,
+    error,
+    httpStatus,
+  };
 }
 
 export async function parseUrlForManualEntry(url: string, storeName?: string, sourceType?: SourceType) {
   const page = await fetchPage(url);
   const settings = await getSettings();
 
-  const detection = detectLotteryInfo({
+  const pageContent: PageContent = {
     title: page.title,
     body: page.body,
     headings: page.headings,
     linkTexts: page.linkTexts,
+    links: page.links,
+    sourceUrl: url,
+  };
+
+  const detection = defaultLotteryDetector.detect(pageContent, {
     detectKeywords: settings.detect_keywords,
     excludeKeywords: settings.exclude_keywords,
   });
 
-  const dates = extractDates(page.body);
-  const productName = extractProductName(page.body, page.title);
-  const conditions = extractConditions(page.body);
-  const channel = detectChannel(page.body);
-
-  const confidence = calculateConfidence({
-    matchedProductKeywords: detection.matchedProductKeywords,
-    matchedSaleKeywords: detection.matchedSaleKeywords,
-    hasApplicationForm: detection.hasApplicationForm,
-    applicationDeadline: dates.application_deadline,
-    productName,
+  const extracted = defaultLotteryExtractor.extract(pageContent, detection, {
+    storeName: storeName ?? '手動登録',
     sourceType: sourceType ?? 'other',
-    lotteryResultDate: dates.lottery_result_date,
-    purchasePeriod: dates.purchase_period,
+    region: 'nationwide',
   });
 
   return {
-    store_name: storeName ?? '手動登録',
-    product_name: productName,
-    title: page.title || '不明',
-    application_start: dates.application_start,
-    application_deadline: dates.application_deadline,
-    lottery_result_date: dates.lottery_result_date,
-    purchase_period: dates.purchase_period ?? '不明',
-    conditions: conditions ?? '不明',
-    channel,
-    source_url: url,
+    store_name: extracted.storeName,
+    product_name: extracted.productName,
+    title: extracted.title,
+    application_start: extracted.applicationStart,
+    application_deadline: extracted.applicationDeadline,
+    lottery_result_date: extracted.lotteryResultDate,
+    purchase_period: extracted.purchasePeriod,
+    conditions: extracted.conditions,
+    channel: extracted.channel,
+    source_url: extracted.sourceUrl,
+    application_url: extracted.applicationUrl,
     source_type: sourceType ?? 'other',
-    confidence,
-    excerpt: detection.excerpt,
-    status: detection.detected ? (confidence < 40 ? 'needs_review' : 'unconfirmed') : 'needs_review',
-    is_excluded: detection.isExcluded,
-    detected: detection.detected,
+    confidence: extracted.confidence,
+    excerpt: extracted.excerpt,
+    status: detection.isCandidate ? extracted.status : 'needs_review',
+    is_excluded: extracted.isExcluded,
+    detected: detection.isCandidate,
+    classification: detection.classification,
     httpStatus: page.httpStatus,
   };
 }

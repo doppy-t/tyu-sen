@@ -11,6 +11,10 @@ interface CrawlLog {
   url: string;
   http_status: number | null;
   detected_count: number;
+  candidate_count?: number;
+  saved_count?: number;
+  duplicate_skipped_count?: number;
+  processing_time_ms?: number;
   error_message: string | null;
 }
 
@@ -213,7 +217,10 @@ export default function MonitorsPage() {
                   <th>終了</th>
                   <th>URL</th>
                   <th>HTTP</th>
-                  <th>検出</th>
+                  <th>候補</th>
+                  <th>保存</th>
+                  <th>重複除外</th>
+                  <th>処理ms</th>
                   <th>エラー</th>
                 </tr>
               </thead>
@@ -224,7 +231,10 @@ export default function MonitorsPage() {
                     <td className="text-sm">{l.ended_at ? new Date(l.ended_at).toLocaleString('ja-JP') : '-'}</td>
                     <td className="text-sm">{l.url.slice(0, 50)}</td>
                     <td>{l.http_status ?? '-'}</td>
-                    <td>{l.detected_count}</td>
+                    <td>{l.candidate_count ?? l.detected_count}</td>
+                    <td>{l.saved_count ?? l.detected_count}</td>
+                    <td>{l.duplicate_skipped_count ?? 0}</td>
+                    <td>{l.processing_time_ms ?? '-'}</td>
                     <td className="text-sm" style={{ color: l.error_message ? 'var(--danger)' : 'inherit' }}>{l.error_message ?? '-'}</td>
                   </tr>
                 ))}

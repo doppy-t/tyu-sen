@@ -6,7 +6,7 @@ import {
   type Listing,
   type ListingStatus,
 } from '@/lib/types';
-import { formatDisplayDate } from '@/lib/date-parser';
+import { formatDisplayDate, formatDisplayValue } from '@/lib/date-parser';
 
 export function StatusBadge({ status }: { status: ListingStatus }) {
   return <span className={`badge badge-${status}`}>{STATUS_LABELS[status]}</span>;
@@ -42,8 +42,10 @@ export function ListingCard({ listing, onStatusChange, onEdit, onViewSimilar }: 
       </div>
 
       <div className="listing-card-meta">
-        <span>商品: {listing.product_name || '不明'}</span>
+        <span>商品: {formatDisplayValue(listing.product_name)}</span>
         <span>締切: {formatDisplayDate(listing.application_deadline)}</span>
+        <span>購入期間: {formatDisplayValue(listing.purchase_period)}</span>
+        <span>条件: {formatDisplayValue(listing.conditions)}</span>
         <span>地域: {REGION_LABELS[listing.region]}</span>
         <span>販売: {CHANNEL_LABELS[listing.channel]}</span>
         <span>情報源: {SOURCE_TYPE_LABELS[listing.source_type]}</span>
@@ -59,6 +61,11 @@ export function ListingCard({ listing, onStatusChange, onEdit, onViewSimilar }: 
         {listing.source_url && (
           <a href={listing.source_url} target="_blank" rel="noopener noreferrer" className="btn btn-secondary btn-sm">
             元ページを開く
+          </a>
+        )}
+        {listing.application_url && (
+          <a href={listing.application_url} target="_blank" rel="noopener noreferrer" className="btn btn-secondary btn-sm">
+            応募ページ
           </a>
         )}
         <button className="btn btn-warning btn-sm" onClick={() => onStatusChange(listing.id, 'planned')}>応募予定</button>
