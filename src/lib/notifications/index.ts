@@ -1,5 +1,5 @@
-import { getDb } from '@/lib/db';
-import type { NotificationType } from '@/lib/types';
+import { getDb } from '../db';
+import type { NotificationType } from '../types';
 
 export interface NotificationProvider {
   send(type: NotificationType, listingId: number | null, message: string): Promise<void>;
