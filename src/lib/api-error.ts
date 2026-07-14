@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { DbConfigError, DbConnectionError } from '@/lib/db/errors';
 
 const DB_SETUP_HINT =
-  'Vercel Dashboard → Project → Settings → Environment Variables で DATABASE_URL または POSTGRES_URL を設定し、再デプロイしてください。Vercel Postgres を使う場合は Storage タブからデータベースを作成してプロジェクトに接続できます。';
+  'Vercel Dashboard → Project → Settings → Environment Variables で DATABASE_URL、POSTGRES_URL、または STORAGE_URL のいずれかを設定し、再デプロイしてください。Neon連携時は STORAGE_URL または DATABASE_URL が自動設定されます。';
 
 export function handleApiError(e: unknown, context: string): NextResponse {
   const err = e instanceof Error ? e : new Error(String(e));

@@ -169,12 +169,42 @@ const REQUIRED_TABLES = [
   'exclude_keywords',
 ] as const;
 
-function detectDatabaseEnvVar(): string | null {
-  if (process.env.DATABASE_URL) return 'DATABASE_URL';
-  if (process.env.POSTGRES_URL) return 'POSTGRES_URL';
-  if (process.env.POSTGRES_URL_NON_POOLING) return 'POSTGRES_URL_NON_POOLING';
-  if (process.env.POSTGRES_PRISMA_URL) return 'POSTGRES_PRISMA_URL';
+/** 優先順位の高い順。最初に値が設定されている変数を使用する */
+export const DATABASE_ENV_VAR_NAMES = [
+  'DATABASE_URL',
+  'POSTGRES_URL',
+  'STORAGE_URL',
+  'POSTGRES_URL_NON_POOLING',
+  'POSTGRES_PRISMA_URL',
+] as const;
+
+export type DatabaseEnvVarName = (typeof DATABASE_ENV_VAR_NAMES)[number];
+
+export function getDatabaseEnvVarStatus(): Record<DatabaseEnvVarName, boolean> {
+  return Object.fromEntries(
+    DATABASE_ENV_VAR_NAMES.map((name) => [name, Boolean(process.env[name])])
+  ) as Record<DatabaseEnvVarName, boolean>;
+}
+
+function detectDatabaseEnvVar(): DatabaseEnvVarName | null {
+  for (const name of DATABASE_ENV_VAR_NAMES) {
+    if (process.env[name]) return name;
+  }
   return null;
+}
+
+function logDatabaseEnvStatus(selected: DatabaseEnvVarName | null): void {
+  console.log('[DB] Database environment variable check:');
+  for (const name of DATABASE_ENV_VAR_NAMES) {
+    console.log(`[DB]   ${name}: ${process.env[name] ? 'set' : 'not set'}`);
+  }
+  if (selected) {
+    console.log(`[DB] Using database connection from env var: ${selected}`);
+  } else if (process.env.VERCEL === '1') {
+    console.log('[DB] No database connection env var found (Vercel requires one of the above)');
+  } else {
+    console.log('[DB] No database connection env var found, will use SQLite for local dev');
+  }
 }
 
 export function getDatabaseUrl(): string | undefined {
@@ -182,6 +212,10 @@ export function getDatabaseUrl(): string | undefined {
   if (!envVar) return undefined;
   activeEnvVar = envVar;
   return process.env[envVar];
+}
+
+export function getActiveDatabaseEnvVar(): DatabaseEnvVarName | null {
+  return detectDatabaseEnvVar();
 }
 
 export function getDbMode(): 'postgres' | 'sqlite' | 'unconfigured' {
@@ -240,7 +274,7 @@ async function getPg(): Promise<import('postgres').Sql> {
     const url = getDatabaseUrl();
     if (!url) {
       throw new DbConfigError(
-        'DATABASE_URL (または POSTGRES_URL) が未設定です。Vercelでは Neon / Vercel Postgres / Supabase の接続文字列を設定してください。'
+        'DATABASE_URL / POSTGRES_URL / STORAGE_URL のいずれかが未設定です。Vercelでは Neon / Vercel Postgres / Supabase の接続文字列を設定してください。'
       );
     }
     try {
@@ -347,18 +381,24 @@ export async function dbRun(sql: string, params: unknown[] = []): Promise<{ last
 export async function ensureDb(): Promise<void> {
   if (initialized) return;
 
-  const url = getDatabaseUrl();
+  const envVar = detectDatabaseEnvVar();
+  logDatabaseEnvStatus(envVar);
+
+  const url = envVar ? process.env[envVar] : undefined;
+  activeEnvVar = envVar;
   const isVercel = process.env.VERCEL === '1';
 
   if (url || isVercel) {
     postgresMode = true;
     if (!url) {
       const msg =
-        'Vercel環境では DATABASE_URL または POSTGRES_URL の設定が必須です。SQLiteファイルはサーバーレス環境で永続化できません。';
+        'Vercel環境では DATABASE_URL / POSTGRES_URL / STORAGE_URL のいずれかの設定が必須です。SQLiteファイルはサーバーレス環境で永続化できません。';
       console.error('[DB] Configuration error:', msg);
-      console.error('[DB] Checked env vars (all empty): DATABASE_URL, POSTGRES_URL, POSTGRES_URL_NON_POOLING, POSTGRES_PRISMA_URL');
+      console.error(`[DB] Checked env vars (all empty): ${DATABASE_ENV_VAR_NAMES.join(', ')}`);
       throw new DbConfigError(msg);
     }
+
+    console.log('[DB] Initializing PostgreSQL...', { envVar: activeEnvVar });
 
     try {
       const pg = await getPg();
@@ -401,19 +441,24 @@ export async function getDbHealth(): Promise<{
   mode: 'postgres' | 'sqlite' | 'unconfigured';
   connected: boolean;
   envVar: string | null;
+  envVarStatus: Record<DatabaseEnvVarName, boolean>;
+  supportedEnvVars: DatabaseEnvVarName[];
   tables: string[];
   monitorSiteCount: number;
   error?: string;
 }> {
+  const envVarStatus = getDatabaseEnvVarStatus();
   const mode = getDbMode();
   if (mode === 'unconfigured') {
     return {
       mode,
       connected: false,
       envVar: null,
+      envVarStatus,
+      supportedEnvVars: [...DATABASE_ENV_VAR_NAMES],
       tables: [],
       monitorSiteCount: 0,
-      error: 'DATABASE_URL または POSTGRES_URL が未設定です',
+      error: 'DATABASE_URL / POSTGRES_URL / STORAGE_URL のいずれかが未設定です',
     };
   }
 
@@ -434,6 +479,8 @@ export async function getDbHealth(): Promise<{
       mode: postgresMode ? 'postgres' : 'sqlite',
       connected: true,
       envVar: activeEnvVar,
+      envVarStatus,
+      supportedEnvVars: [...DATABASE_ENV_VAR_NAMES],
       tables,
       monitorSiteCount: Number(countRow?.c ?? 0),
     };
@@ -444,6 +491,8 @@ export async function getDbHealth(): Promise<{
       mode,
       connected: false,
       envVar: activeEnvVar,
+      envVarStatus,
+      supportedEnvVars: [...DATABASE_ENV_VAR_NAMES],
       tables: [],
       monitorSiteCount: 0,
       error: message,

@@ -14,7 +14,20 @@ import {
   isPostgresMode,
 } from './db/client';
 
-export { ensureDb, dbAll, dbGet, dbRun, isPostgresMode, getDatabaseUrl, dbBool, getDbMode, getDbHealth } from './db/client';
+export {
+  ensureDb,
+  dbAll,
+  dbGet,
+  dbRun,
+  isPostgresMode,
+  getDatabaseUrl,
+  dbBool,
+  getDbMode,
+  getDbHealth,
+  DATABASE_ENV_VAR_NAMES,
+  getDatabaseEnvVarStatus,
+  getActiveDatabaseEnvVar,
+} from './db/client';
 
 export async function getSettings(): Promise<AppSettings> {
   await ensureDb();
