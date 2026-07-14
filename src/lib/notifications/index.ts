@@ -1,3 +1,4 @@
+// src/lib/db.ts は親ディレクトリに存在するため相対パスで参照
 import { getDb } from '../db';
 import type { NotificationType } from '../types';
 
