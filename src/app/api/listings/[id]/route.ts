@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb, rowToListing } from '@/lib/db';
+import { dbAll, dbGet, dbRun, rowToListing } from '@/lib/db';
 import { findSimilarListings } from '@/lib/deduplicator';
 
 export const dynamic = 'force-dynamic';
@@ -9,12 +9,11 @@ export async function GET(
   { params }: { params: { id: string } }
 ) {
   try {
-    const db = getDb();
-    const row = db.prepare('SELECT * FROM listings WHERE id = ?').get(params.id);
+    const row = await dbGet('SELECT * FROM listings WHERE id = ?', [params.id]);
     if (!row) return NextResponse.json({ error: 'Not found' }, { status: 404 });
 
-    const listing = rowToListing(row as Record<string, unknown>);
-    const all = db.prepare('SELECT * FROM listings').all().map((r) => rowToListing(r as Record<string, unknown>));
+    const listing = rowToListing(row);
+    const all = (await dbAll('SELECT * FROM listings')).map((r) => rowToListing(r));
     const similar = findSimilarListings(listing, all);
 
     return NextResponse.json({ listing, similar });
@@ -29,7 +28,6 @@ export async function PATCH(
 ) {
   try {
     const body = await request.json();
-    const db = getDb();
     const allowed = [
       'status', 'product_name', 'title', 'application_start', 'application_deadline',
       'lottery_result_date', 'purchase_period', 'conditions', 'region', 'channel',
@@ -52,9 +50,9 @@ export async function PATCH(
     sets.push("updated_at = datetime('now')");
     values.push(params.id);
 
-    db.prepare(`UPDATE listings SET ${sets.join(', ')} WHERE id = ?`).run(...values);
-    const row = db.prepare('SELECT * FROM listings WHERE id = ?').get(params.id);
-    return NextResponse.json(rowToListing(row as Record<string, unknown>));
+    await dbRun(`UPDATE listings SET ${sets.join(', ')} WHERE id = ?`, values);
+    const row = await dbGet('SELECT * FROM listings WHERE id = ?', [params.id]);
+    return NextResponse.json(rowToListing(row!));
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 500 });
   }
@@ -65,7 +63,7 @@ export async function DELETE(
   { params }: { params: { id: string } }
 ) {
   try {
-    getDb().prepare('DELETE FROM listings WHERE id = ?').run(params.id);
+    await dbRun('DELETE FROM listings WHERE id = ?', [params.id]);
     return NextResponse.json({ ok: true });
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 500 });

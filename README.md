@@ -35,7 +35,9 @@ npm run dev
 
 初回起動時に `data/tyu-sen.db`（SQLite）が自動作成され、サンプル店舗16件が登録されます（URLは未設定・無効状態）。
 
-### 本番起動
+> **Vercel 本番環境**では SQLite ファイルは永続化できないため、PostgreSQL（Neon / Vercel Postgres / Supabase）が必須です。`DATABASE_URL` または `POSTGRES_URL` を環境変数に設定してください。未設定の場合は API が 500 エラーになります。
+
+### 本番起動（Vercel）
 
 ```bash
 npm run build
@@ -85,7 +87,7 @@ ENABLE_CRON=true
 |------|------|
 | フロントエンド | Next.js 14 (App Router) + React |
 | 言語 | TypeScript |
-| DB | SQLite (better-sqlite3) |
+| DB | ローカル: SQLite / Vercel: PostgreSQL（postgres） |
 | ページ取得 | fetch + cheerio |
 | 定期実行 | node-cron |
 | 日時解析 | date-fns |
@@ -97,7 +99,8 @@ src/
 ├── app/              # ページ・API Routes
 ├── components/       # UIコンポーネント
 └── lib/
-    ├── db.ts         # SQLite
+    ├── db.ts         # DBアクセス（設定・行変換）
+    ├── db/client.ts  # SQLite / PostgreSQL デュアルモード
     ├── crawler.ts    # ページ取得・巡回
     ├── detector.ts   # キーワード検出・信頼度
     ├── deduplicator.ts
@@ -110,7 +113,8 @@ src/
 
 `.env.example` を参照してください。
 
-- `DATABASE_PATH` — DBファイルのパス
+- `DATABASE_URL` / `POSTGRES_URL` — PostgreSQL接続文字列（**Vercel本番で必須**）
+- `DATABASE_PATH` — ローカル開発時のSQLiteファイルパス（省略可）
 - `ENABLE_CRON` — 定期巡回の有効化
 - `X_API_BEARER_TOKEN` — X API（未実装）
 - `DISCORD_WEBHOOK_URL` — Discord通知

@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb, rowToListing } from '@/lib/db';
+import { dbRun, rowToListing } from '@/lib/db';
 import { getListings, type ListingFilters } from '@/lib/services';
-import { findSimilarListings } from '@/lib/deduplicator';
 import type { ListingStatus } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -27,8 +26,8 @@ export async function GET(request: NextRequest) {
     if (sp.get('similar_group_id')) filters.similar_group_id = sp.get('similar_group_id')!;
     if (sp.get('status')) filters.status = sp.get('status') as ListingStatus;
 
-    const rows = getListings(filters);
-    const listings = rows.map((r) => rowToListing(r as Record<string, unknown>));
+    const rows = await getListings(filters);
+    const listings = rows.map((r) => rowToListing(r));
     return NextResponse.json(listings);
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 500 });
@@ -38,32 +37,30 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const db = getDb();
-    const now = new Date().toISOString();
-
-    const result = db.prepare(`
-      INSERT INTO listings (
+    const result = await dbRun(
+      `INSERT INTO listings (
         store_name, product_name, title, application_start, application_deadline,
         lottery_result_date, purchase_period, conditions, region, channel, source_url,
         source_type, confidence, excerpt, status, is_manual, is_excluded
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
-    `).run(
-      body.store_name ?? '手動登録',
-      body.product_name ?? '不明',
-      body.title ?? '不明',
-      body.application_start ?? null,
-      body.application_deadline ?? null,
-      body.lottery_result_date ?? null,
-      body.purchase_period ?? '不明',
-      body.conditions ?? '不明',
-      body.region ?? 'nationwide',
-      body.channel ?? 'unknown',
-      body.source_url ?? '',
-      body.source_type ?? 'other',
-      body.confidence ?? 50,
-      body.excerpt ?? '',
-      body.status ?? 'unconfirmed',
-      body.is_excluded ? 1 : 0
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+      [
+        body.store_name ?? '手動登録',
+        body.product_name ?? '不明',
+        body.title ?? '不明',
+        body.application_start ?? null,
+        body.application_deadline ?? null,
+        body.lottery_result_date ?? null,
+        body.purchase_period ?? '不明',
+        body.conditions ?? '不明',
+        body.region ?? 'nationwide',
+        body.channel ?? 'unknown',
+        body.source_url ?? '',
+        body.source_type ?? 'other',
+        body.confidence ?? 50,
+        body.excerpt ?? '',
+        body.status ?? 'unconfirmed',
+        body.is_excluded ? 1 : 0,
+      ]
     );
 
     return NextResponse.json({ id: result.lastInsertRowid }, { status: 201 });

@@ -1,36 +1,37 @@
-import { getDb } from './db';
+import { dbAll } from './db';
 import type { ListingStatus } from './types';
 import type { DashboardStats } from './types-dashboard';
 
 export type { DashboardStats };
 
-export function getDashboardStats(): DashboardStats {
-  const db = getDb();
+export async function getDashboardStats(): Promise<DashboardStats> {
   const now = new Date();
   const todayEnd = new Date(now);
   todayEnd.setHours(23, 59, 59, 999);
   const threeDaysLater = new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000);
 
-  const newCount = (db.prepare(`
+  const newCountRow = await dbAll(`
     SELECT COUNT(*) as c FROM listings
     WHERE detected_at > datetime('now', '-1 day') AND is_sample = 0
-  `).get() as { c: number }).c;
+  `);
+  const newCount = Number(newCountRow[0]?.c ?? 0);
 
-  const unconfirmedCount = (db.prepare(`
+  const unconfirmedRow = await dbAll(`
     SELECT COUNT(*) as c FROM listings WHERE status = 'unconfirmed' AND is_sample = 0
-  `).get() as { c: number }).c;
+  `);
+  const unconfirmedCount = Number(unconfirmedRow[0]?.c ?? 0);
 
-  const appliedCount = (db.prepare(`
-    SELECT COUNT(*) as c FROM listings WHERE status = 'applied'
-  `).get() as { c: number }).c;
+  const appliedRow = await dbAll(`SELECT COUNT(*) as c FROM listings WHERE status = 'applied'`);
+  const appliedCount = Number(appliedRow[0]?.c ?? 0);
 
-  const monitorCount = (db.prepare('SELECT COUNT(*) as c FROM monitor_sites').get() as { c: number }).c;
+  const monitorRow = await dbAll('SELECT COUNT(*) as c FROM monitor_sites');
+  const monitorCount = Number(monitorRow[0]?.c ?? 0);
 
-  const allListings = db.prepare(`
+  const allListings = await dbAll(`
     SELECT application_deadline FROM listings
     WHERE application_deadline IS NOT NULL AND status NOT IN ('excluded', 'expired', 'applied')
     AND is_sample = 0
-  `).all() as { application_deadline: string }[];
+  `) as { application_deadline: string }[];
 
   let todayDeadline = 0;
   let threeDayDeadline = 0;
@@ -43,14 +44,14 @@ export function getDashboardStats(): DashboardStats {
     } catch { /* skip */ }
   }
 
-  const lastCrawl = db.prepare(`
-    SELECT ended_at FROM crawl_logs ORDER BY id DESC LIMIT 1
-  `).get() as { ended_at: string } | undefined;
+  const lastCrawlRows = await dbAll(`SELECT ended_at FROM crawl_logs ORDER BY id DESC LIMIT 1`);
+  const lastCrawl = lastCrawlRows[0] as { ended_at: string } | undefined;
 
-  const crawlErrors = (db.prepare(`
+  const crawlErrorsRow = await dbAll(`
     SELECT COUNT(*) as c FROM crawl_logs
     WHERE error_message IS NOT NULL AND started_at > datetime('now', '-7 days')
-  `).get() as { c: number }).c;
+  `);
+  const crawlErrors = Number(crawlErrorsRow[0]?.c ?? 0);
 
   return {
     new_count: newCount,
@@ -59,7 +60,7 @@ export function getDashboardStats(): DashboardStats {
     three_day_deadline_count: threeDayDeadline,
     applied_count: appliedCount,
     monitor_count: monitorCount,
-    last_crawl_at: lastCrawl?.ended_at ?? null,
+    last_crawl_at: lastCrawl?.ended_at ? String(lastCrawl.ended_at) : null,
     crawl_error_count: crawlErrors,
   };
 }
@@ -82,8 +83,7 @@ export interface ListingFilters {
   similar_group_id?: string;
 }
 
-export function getListings(filters: ListingFilters = {}) {
-  const db = getDb();
+export async function getListings(filters: ListingFilters = {}) {
   const conditions: string[] = ['1=1'];
   const params: unknown[] = [];
 
@@ -105,13 +105,13 @@ export function getListings(filters: ListingFilters = {}) {
   }
 
   if (filters.deadline_24h) {
-    conditions.push("application_deadline IS NOT NULL");
+    conditions.push('application_deadline IS NOT NULL');
     conditions.push("application_deadline <= datetime('now', '+1 day')");
     conditions.push("application_deadline > datetime('now')");
   }
 
   if (filters.deadline_3d) {
-    conditions.push("application_deadline IS NOT NULL");
+    conditions.push('application_deadline IS NOT NULL');
     conditions.push("application_deadline <= datetime('now', '+3 days')");
     conditions.push("application_deadline > datetime('now')");
   }
@@ -167,5 +167,5 @@ export function getListings(filters: ListingFilters = {}) {
       detected_at DESC
   `;
 
-  return db.prepare(sql).all(...params);
+  return dbAll(sql, params);
 }

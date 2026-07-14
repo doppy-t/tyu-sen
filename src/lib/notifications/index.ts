@@ -1,5 +1,5 @@
 // src/lib/db.ts は親ディレクトリに存在するため相対パスで参照
-import { getDb } from '../db';
+import { dbAll, dbRun } from '../db';
 import type { NotificationType } from '../types';
 
 export interface NotificationProvider {
@@ -8,9 +8,10 @@ export interface NotificationProvider {
 
 class InAppNotificationProvider implements NotificationProvider {
   async send(type: NotificationType, listingId: number | null, message: string): Promise<void> {
-    getDb().prepare(`
-      INSERT INTO notifications (type, listing_id, message) VALUES (?, ?, ?)
-    `).run(type, listingId, message);
+    await dbRun(
+      `INSERT INTO notifications (type, listing_id, message) VALUES (?, ?, ?)`,
+      [type, listingId, message]
+    );
   }
 }
 
@@ -34,18 +35,15 @@ export async function createNotification(
   }
 }
 
-export function checkDeadlineNotifications() {
-  const db = getDb();
+export async function checkDeadlineNotifications() {
   const now = new Date();
-  const in24h = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString();
-  const in3h = new Date(now.getTime() + 3 * 60 * 60 * 1000).toISOString();
 
-  const listings = db.prepare(`
+  const listings = await dbAll(`
     SELECT * FROM listings
     WHERE status IN ('unconfirmed', 'needs_review', 'planned')
     AND application_deadline IS NOT NULL
     AND is_sample = 0
-  `).all() as { id: number; title: string; application_deadline: string; status: string }[];
+  `) as { id: number; title: string; application_deadline: string; status: string }[];
 
   for (const listing of listings) {
     try {
@@ -56,32 +54,32 @@ export function checkDeadlineNotifications() {
       const hoursLeft = diff / (1000 * 60 * 60);
 
       if (hoursLeft > 0 && hoursLeft <= 24) {
-        const existing = db.prepare(`
+        const existing = await dbAll(`
           SELECT id FROM notifications WHERE listing_id = ? AND type = 'deadline_24h'
           AND created_at > datetime('now', '-1 day')
-        `).get(listing.id);
-        if (!existing) {
-          createNotification('deadline_24h', listing.id, `締切24時間前: ${listing.title}`);
+        `, [listing.id]);
+        if (existing.length === 0) {
+          await createNotification('deadline_24h', listing.id, `締切24時間前: ${listing.title}`);
         }
       }
 
       if (hoursLeft > 0 && hoursLeft <= 3) {
-        const existing = db.prepare(`
+        const existing = await dbAll(`
           SELECT id FROM notifications WHERE listing_id = ? AND type = 'deadline_3h'
           AND created_at > datetime('now', '-3 hours')
-        `).get(listing.id);
-        if (!existing) {
-          createNotification('deadline_3h', listing.id, `締切3時間前: ${listing.title}`);
+        `, [listing.id]);
+        if (existing.length === 0) {
+          await createNotification('deadline_3h', listing.id, `締切3時間前: ${listing.title}`);
         }
       }
 
       if (listing.status === 'planned' && hoursLeft > 0 && hoursLeft <= 48) {
-        const existing = db.prepare(`
+        const existing = await dbAll(`
           SELECT id FROM notifications WHERE listing_id = ? AND type = 'planned_not_applied'
           AND created_at > datetime('now', '-1 day')
-        `).get(listing.id);
-        if (!existing) {
-          createNotification('planned_not_applied', listing.id, `応募予定だが未応募: ${listing.title}`);
+        `, [listing.id]);
+        if (existing.length === 0) {
+          await createNotification('planned_not_applied', listing.id, `応募予定だが未応募: ${listing.title}`);
         }
       }
     } catch {
@@ -90,26 +88,25 @@ export function checkDeadlineNotifications() {
   }
 }
 
-export function getNotifications(unreadOnly = false) {
-  const db = getDb();
+export async function getNotifications(unreadOnly = false) {
   const query = unreadOnly
     ? 'SELECT * FROM notifications WHERE read = 0 ORDER BY created_at DESC LIMIT 50'
     : 'SELECT * FROM notifications ORDER BY created_at DESC LIMIT 100';
-  return db.prepare(query).all();
+  return dbAll(query);
 }
 
-export function markNotificationRead(id: number) {
-  getDb().prepare('UPDATE notifications SET read = 1 WHERE id = ?').run(id);
+export async function markNotificationRead(id: number) {
+  await dbRun('UPDATE notifications SET read = 1 WHERE id = ?', [id]);
 }
 
-export function markAllNotificationsRead() {
-  getDb().prepare('UPDATE notifications SET read = 1 WHERE read = 0').run();
+export async function markAllNotificationsRead() {
+  await dbRun('UPDATE notifications SET read = 1 WHERE read = 0');
 }
 
 // 将来の拡張用スタブ
 export class DiscordNotificationProvider implements NotificationProvider {
   constructor(private webhookUrl: string) {}
-  async send(type: NotificationType, listingId: number | null, message: string): Promise<void> {
+  async send(type: NotificationType, _listingId: number | null, message: string): Promise<void> {
     if (!this.webhookUrl) return;
     await fetch(this.webhookUrl, {
       method: 'POST',

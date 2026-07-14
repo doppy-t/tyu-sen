@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb, rowToMonitorSite } from '@/lib/db';
-import { crawlMonitorSite } from '@/lib/crawler';
+import { dbGet, dbRun, rowToMonitorSite } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 
@@ -9,9 +8,9 @@ export async function GET(
   { params }: { params: { id: string } }
 ) {
   try {
-    const row = getDb().prepare('SELECT * FROM monitor_sites WHERE id = ?').get(params.id);
+    const row = await dbGet('SELECT * FROM monitor_sites WHERE id = ?', [params.id]);
     if (!row) return NextResponse.json({ error: 'Not found' }, { status: 404 });
-    return NextResponse.json(rowToMonitorSite(row as Record<string, unknown>));
+    return NextResponse.json(rowToMonitorSite(row));
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 500 });
   }
@@ -23,7 +22,6 @@ export async function PATCH(
 ) {
   try {
     const body = await request.json();
-    const db = getDb();
     const allowed = ['name', 'url', 'source_type', 'frequency_minutes', 'enabled', 'region', 'memo'];
     const sets: string[] = [];
     const values: unknown[] = [];
@@ -39,9 +37,9 @@ export async function PATCH(
     sets.push("updated_at = datetime('now')");
     values.push(params.id);
 
-    db.prepare(`UPDATE monitor_sites SET ${sets.join(', ')} WHERE id = ?`).run(...values);
-    const row = db.prepare('SELECT * FROM monitor_sites WHERE id = ?').get(params.id);
-    return NextResponse.json(rowToMonitorSite(row as Record<string, unknown>));
+    await dbRun(`UPDATE monitor_sites SET ${sets.join(', ')} WHERE id = ?`, values);
+    const row = await dbGet('SELECT * FROM monitor_sites WHERE id = ?', [params.id]);
+    return NextResponse.json(rowToMonitorSite(row!));
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 500 });
   }
@@ -52,7 +50,7 @@ export async function DELETE(
   { params }: { params: { id: string } }
 ) {
   try {
-    getDb().prepare('DELETE FROM monitor_sites WHERE id = ?').run(params.id);
+    await dbRun('DELETE FROM monitor_sites WHERE id = ?', [params.id]);
     return NextResponse.json({ ok: true });
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 500 });
